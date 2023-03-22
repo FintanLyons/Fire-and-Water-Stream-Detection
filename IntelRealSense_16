@@ -1,0 +1,224 @@
+# Moves target point to top of contour
+# Detect only the largest contour
+# works in all frames but the sky one
+import pyrealsense2 as rs
+# Import Numpy for easy array manipulation
+import numpy as np
+# Import OpenCV for easy image rendering
+import cv2
+# Import argparse for command-line options
+import argparse
+# Import os.path for file path manipulation
+import os.path
+# Import PID controller
+from simple_pid import PID
+
+#Experiment 1: D:\\D Downloads\\20230112_142006.bag
+#Experiment 2.1: D:\\D Downloads\\20230210_153108.bag
+#Experiment 2.2: D:\\D Downloads\\20230210_154422.bag
+#Experiment 2.3: D:\\D Downloads\\20230210_154606.bag #DOESN'T WORK
+#Experiment 2.4: D:\\D Downloads\\20230210_154853.bag #DOESN'T WORK
+#Experiment 2.5: D:\\D Downloads\\20230210_155144.bag
+
+# Create object for parsing command-line options
+parser = argparse.ArgumentParser(description="Read recorded bag file and display depth stream in jet colormap.\
+                                Remember to change the stream fps and format to match the recorded.")
+# Add argument which takes path to a bag file as an input
+parser.add_argument("-i", "--input", type=str, default="D:\\D Downloads\\20230112_142006.bag", help="Path to the bag file")
+# Parse the command line arguments to an object
+args = parser.parse_args()
+# Safety if no parameter have been given
+if not args.input:
+    print("No input paramater have been given.")
+    print("For help type --help")
+    exit()
+# Check if the given file have bag extension
+if os.path.splitext(args.input)[1] != ".bag":
+    print("The given file is not of correct file format.")
+    print("Only .bag files are accepted")
+    exit()
+try:
+    # Create pipeline
+    pipeline = rs.pipeline()
+
+    # Create a config object
+    config = rs.config()
+
+    # Tell config that we will use a recorded device from file to be used by the pipeline through playback.
+    rs.config.enable_device_from_file(config, args.input)
+
+    # Configure the pipeline to stream the depth stream
+    # Change this parameters according to the recorded bag file resolution
+    config.enable_stream(rs.stream.depth, rs.format.z16, 15)
+    config.enable_stream(rs.stream.color, rs.format.rgb8, 15)
+
+    # Start streaming from file
+    pipeline.start(config)
+
+    # Create opencv window to render depth image
+    cv2.namedWindow("Depth Stream", cv2.WINDOW_AUTOSIZE)
+    # Create opencv window to render rgb image
+    cv2.namedWindow("RGB Stream", cv2.WINDOW_AUTOSIZE)
+    
+    # Create colorizer object
+    colorizer = rs.colorizer()
+
+    # Make a list of images
+    image_list = []
+    depth_list = []
+    zero_list = [0,0]
+    water_stream = False
+
+    fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=False)
+
+    #define intel6_frame.jpg as the background image
+    cv2.imwrite("intel6_frame.jpg", np.asanyarray(pipeline.wait_for_frames().get_color_frame().get_data()))
+
+    # define x and y - arbituary values in this save - SHOULD BE CHANGED TO POSITION OF WATER STREAM   
+    x = 600
+    y = 470
+
+    # Streaming loop
+    while True:
+        # Get frameset of depth
+        frames = pipeline.wait_for_frames()
+
+        # Get depth frame
+        depth_frame = frames.get_depth_frame()
+
+        # Get rgb frame
+        rgb_frame = frames.get_color_frame()
+
+        # Convert rgb_frame to numpy array to render image in opencv
+        rgb_image = np.asanyarray(rgb_frame.get_data())
+
+        # Colorize depth frame to jet colormap
+        depth_color_frame = colorizer.colorize(depth_frame)
+
+        # Convert depth_frame to numpy array to render image in opencv
+        depth_color_image = np.asanyarray(depth_color_frame.get_data())
+
+        #height and width of the depth image
+        height, width = depth_color_image.shape[:2]
+
+        #convert the rgb frame to lab
+        rgb_lab = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(rgb_lab)
+        l = cv2.add(l, -100)
+        l = np.clip(l, 0, 255)
+        clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        limg = cv2.merge((cl,a,b))
+        enhanced_rgb_image = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+        #Read background image
+        background = cv2.imread("intel6_frame.jpg")
+
+        # enhance background image
+        background_lab = cv2.cvtColor(background, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(background_lab)
+        l = cv2.add(l, -100)
+        l = np.clip(l, 0, 255)
+        clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        limg = cv2.merge((cl,a,b))
+        enhanced_background_image = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+        background_gray = cv2.cvtColor(background, cv2.COLOR_BGR2GRAY)
+
+        gray = cv2.cvtColor(enhanced_rgb_image, cv2.COLOR_BGR2GRAY)
+
+        # adjust brightness of water stream
+        gray = cv2.add(gray, 0)
+        gray = np.clip(gray, 0, 255)
+
+        # adjust brightness of background
+        background_gray = cv2.add(background_gray, -30)
+        bavkground_gray = np.clip(background_gray, 0, 255)
+
+        # add blur
+        difference_image = cv2.GaussianBlur(background_gray, (5,5), 0)
+
+        # Compute the absolute difference between the current frame and the background
+        difference_image = cv2.absdiff(background_gray, gray)
+
+        # count number of pixels with a depth value of 0.0
+        array = depth_frame.get_data()
+        no_zeros = height*width - np.count_nonzero(array)
+        # Append zero counts to list
+        zero_list.append(no_zeros)
+        if zero_list[-1] > 4000+zero_list[-2]:
+            water_stream = True
+        if zero_list[-1]+6000 < zero_list[-2]:
+            water_stream = False
+        print(water_stream)
+
+        # water stream enters frame at any point from the bottom``
+        bottom_row = [depth_frame.get_distance(i, height-2) for i in range(0+20, width-20)]
+
+        # detects water stream
+        if (0.0 in bottom_row) and water_stream == True:
+            print('Detecting water stream')
+            background_mean = np.mean(image_list[20:40], axis=0)
+            cv2.imwrite("intel6_frame.jpg", background_mean)
+            # find contours
+            ret, thresh = cv2.threshold(difference_image, 60, 255, cv2.THRESH_BINARY) #best value needs to be found. 60 does not detect all of floor image
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            # if the contour area is greater than 3000, draw a circle on the top point and draw the contour of the water stream
+            sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+            if cv2.contourArea(sorted_contours[0]) > 3000:
+                contour = sorted_contours[0]
+                y_coordinates = [point[0][1] for point in contour]
+                top_point = contour[y_coordinates.index(min(y_coordinates))][0]
+                cv2.drawContours(rgb_image, [contour], -1, (0, 255, 0), 3)
+                
+                # Target coordinates - NEED TO BE DEFINED BY FIRE -  this save moves the dot to the stream, hence stream is target
+                target_x = top_point[0]
+                target_y = top_point[1]
+
+                # Initialize the PID controllers for x and y directions
+                pid_x = PID(Kp=0.8, Ki=0.4, Kd=0.01, setpoint=target_x)
+                pid_y = PID(Kp=0.8, Ki=0.4, Kd=0.01, setpoint=target_y)
+
+                # Calculate the PID output for x and y directions
+                pid_output_x = pid_x(x)
+                pid_output_y = pid_y(y)
+
+                # Update the coordinates of the red dot - THIS NEEDS TO UPDATE THE WATER NOZZLE POSITION
+                x += pid_output_x
+                y += pid_output_y
+
+                # Ensure that the red dot remains within the dimensions of the image
+                x = max(0, min(x, 639))
+                y = max(0, min(y, 479))
+
+                # Draw the red dot for the top point of the water stream
+                cv2.circle(rgb_image, (int(x),int(y)), 1, (0, 0, 255), 5)
+                print(top_point)
+                # Draw the blue dot for the target point
+                cv2.circle(rgb_image, (target_x, target_y), 1, (255, 0, 0), 5)
+
+                if x == target_x and y == target_y:
+                    consecutive_frames += 1
+                else:
+                    consecutive_frames = 0
+        else:
+            image_list.insert(0, enhanced_rgb_image)
+            if len(image_list) > 50:
+                image_list.pop()
+
+        fgmask = fgbg.apply(enhanced_rgb_image)
+        # rgb_image = cv2.addWeighted( rgb_image, 0.5, fgmask, 0.5, 0)
+
+        # Render image in opencv window
+        cv2.imshow("RGB stream", fgmask)
+        cv2.imshow('difference image', difference_image)
+        cv2.imshow("Depth Stream", depth_color_image)
+        cv2.imshow("rgb image",rgb_image)
+        key = cv2.waitKey(1)
+        # if pressed escape exit program
+        if key == 27:
+            cv2.destroyAllWindows()
+            break
+
+finally:
+    pass

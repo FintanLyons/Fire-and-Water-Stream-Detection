@@ -1,0 +1,117 @@
+#importing libraries
+import cv2
+import numpy as np
+import datetime
+
+#reading the video file
+rgb_video = cv2.VideoCapture("C:\\Users\\finta\\OneDrive\\Documents\\Year 3\\Python\\Fire Videos Bibal\\rgb_raw_T4.avi")
+thermal_video = cv2.VideoCapture("C:\\Users\\finta\\OneDrive\\Documents\\Year 3\\Python\\Fire Videos Bibal\\thermal_raw_T4.avi")
+
+# Get the video dimensions
+frame_width = int(rgb_video.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(rgb_video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+frame_fire_count = 0
+frame_count = 0
+
+
+# Define the codec and create VideoWriter object
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+output_video = cv2.VideoWriter('output_video.mp4', fourcc, 30.0, (frame_width, frame_height))
+
+
+#looping through the video frames
+while True:
+    ret, rgb_frame = rgb_video.read()
+    ret, thermal_frame = thermal_video.read()
+
+    # Make a copy of the rgb frame to draw contours on
+    result = rgb_frame.copy()
+
+    # Define the range of colours to detect
+    lower_fire = np.array([0, 100, 100])
+    upper_fire = np.array([50, 255, 255])
+
+    hsv = cv2.cvtColor(rgb_frame, cv2.COLOR_BGR2HSV)
+
+    #convert the thermal frame to lab to increase contrast
+    thermal_lab = cv2.cvtColor(thermal_frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(thermal_lab)
+    l = cv2.add(l, 30)
+    clahe = cv2.createCLAHE(clipLimit=3, tileGridSize=(32,32))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl,a,b))
+    enhanced_thermal_frame = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+    # Convert the image to grayscale then apply a mask to the image
+    gray = cv2.cvtColor(enhanced_thermal_frame, cv2.COLOR_BGR2GRAY)
+
+    # Apply binary thresholding to find the fire
+    _, thresh = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY)
+
+    # Find contours of the thermal fire location
+    thermo_contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    # Find the largest contour and only display that
+    sorted_contours = sorted(thermo_contours, key=cv2.contourArea, reverse=True)
+
+    # Draw the contours on the thermal frame
+    if len(sorted_contours) > 0 and cv2.contourArea(sorted_contours[0]) > 100:
+        # cv2.drawContours(thermal_frame, sorted_contours[0], -1, (0, 255, 0), 3)
+        M = cv2.moments(sorted_contours[0])
+        cx = int(M['m10']/M['m00'])
+        cy = int(M['m01']/M['m00'])
+        # cv2.circle(thermal_frame, (cx,cy), 5, (0, 0, 255), -1)
+
+    # Create a mask for the fire
+    mask = cv2.inRange(hsv, lower_fire, upper_fire)
+    
+    #find the contour of the rgb fire location
+    rgb_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    # Draw the contours on the rgb frame
+    cv2.drawContours(rgb_frame, rgb_contours, -1, (0, 255, 0), 3)
+
+    # if rgb_contours are within a 50 pixel radius of the thermal_contours, show the thermal_contours
+    # Calculates the centre of each rgb_contour
+    for rgb_contour in rgb_contours:
+        M = cv2.moments(rgb_contour)
+        if M["m00"] != 0:
+            tx = int(M['m10']/M['m00'])
+            ty = int(M['m01']/M['m00'])
+        else :
+            tx = 0
+            ty = 0
+
+        distance = np.sqrt((cx - tx)**2 + (cy - ty)**2)
+
+        if distance <= 50 and len(sorted_contours) >0:
+            cv2.drawContours(result, sorted_contours[0], -1, (0, 255, 0), 3)
+            cv2.circle(result, (cx,cy), 5, (0, 0, 255), -1)
+            print(cx, cy)
+            cv2.circle(result, (tx,ty), 5, (255, 0, 0), -1)
+            frame_fire_count += 1
+            break
+       
+
+    output_video.write(result)
+
+    cv2.putText(result, "Frames: " + str(frame_count), (50, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+    cv2.putText(result, "Fire frames: " + str(frame_fire_count), (50, 350), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+    cv2.imshow('Enhanced Thermal', enhanced_thermal_frame)
+    cv2.imshow('Result', result)
+    cv2.imshow('Thermal',thermal_frame)
+    cv2.imshow('Rgb',rgb_frame)
+
+    frame_count += 1
+    
+    output_video.write(result)
+
+    #exiting with pressing 'q'
+    if cv2.waitKey(24) & 0xFF == ord('q'):
+        break
+
+#releasing and destroying windows
+rgb_video.release()
+output_video.release()
+cv2.destroyAllWindows()
